@@ -1,3 +1,4 @@
+mod monitor;
 use std::collections::HashMap;
 use windows::Win32::Foundation::MAX_PATH;
 use windows::Win32::Foundation::UNICODE_STRING;
@@ -318,7 +319,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("1. List all processes");
         println!("2. Refresh process list");
         println!("3. Duplicate a process");
-        println!("4. Exit");
+        println!("4. Monitor AppData\\Local\\Temp for new files with prefix");
+        println!("5. Exit");
         print!("Enter your choice: ");
 
         use std::io::{self, Write};
@@ -363,6 +365,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "4" => {
+                print!("Enter file prefix to monitor: ");
+                io::stdout().flush()?;
+                let mut prefix = String::new();
+                std::io::stdin().read_line(&mut prefix)?;
+                let prefix = prefix.trim().to_string();
+                println!("Press Ctrl+C to stop monitoring.");
+                monitor::monitor_appdata_for_prefix(&prefix);
+            }
+            "5" => {
                 println!("Goodbye!");
                 break;
             }
