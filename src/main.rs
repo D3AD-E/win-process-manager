@@ -21,6 +21,7 @@ struct ProcessInfo {
     name: String,
     command_line: String,
     executable_path: String,
+    current_directory: String,
 }
 
 #[link(name = "ntdll")]
@@ -62,13 +63,15 @@ impl ProcessManager {
                     let name = Self::wide_string_to_string(&pe32.szExeFile);
 
                     // Get command line and executable path
-                    let (command_line, executable_path) = self.get_process_details(pid);
+                    let (command_line, executable_path, current_directory) =
+                        self.get_process_details(pid);
 
                     let process_info = ProcessInfo {
                         pid,
                         name,
                         command_line,
                         executable_path,
+                        current_directory,
                     };
 
                     self.processes.insert(pid, process_info);
@@ -85,14 +88,18 @@ impl ProcessManager {
         Ok(())
     }
 
-    fn get_process_details(&self, pid: u32) -> (String, String) {
+    fn get_process_details(&self, pid: u32) -> (String, String, String) {
         let mut command_line = String::new();
+        let mut current_directory = String::new();
         let mut executable_path = String::new();
 
         if let Some(cmd) = ProcessManager::get_command_line_native(pid) {
             command_line = cmd;
         }
 
+        if let Some(dir) = ProcessManager::get_current_directory_native(pid) {
+            current_directory = dir;
+        }
         // Get executable path
         unsafe {
             let process_handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
@@ -116,7 +123,76 @@ impl ProcessManager {
             }
         }
 
-        (command_line, executable_path)
+        (command_line, executable_path, current_directory)
+    }
+
+    fn get_current_directory_native(pid: u32) -> Option<String> {
+        unsafe {
+            let handle =
+                OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
+
+            let mut pbi = PROCESS_BASIC_INFORMATION::default();
+            let mut ret_len = 0u32;
+            if NtQueryInformationProcess(
+                handle,
+                0,
+                &mut pbi as *mut _ as *mut _,
+                std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                &mut ret_len,
+            ) != 0
+            {
+                CloseHandle(handle);
+                return None;
+            }
+
+            let peb_addr = pbi.PebBaseAddress as usize;
+            let mut proc_params_addr = 0usize;
+
+            if ReadProcessMemory(
+                handle,
+                (peb_addr + 0x20) as _,
+                &mut proc_params_addr as *mut _ as *mut _,
+                std::mem::size_of::<usize>(),
+                None,
+            )
+            .is_err()
+            {
+                CloseHandle(handle);
+                return None;
+            }
+
+            // Read address of CurrentDirectory UNICODE_STRING (offset 0x38 inside RTL_USER_PROCESS_PARAMETERS)
+            let mut cur_dir_unicode = UNICODE_STRING::default();
+            if ReadProcessMemory(
+                handle,
+                (proc_params_addr + 0x38) as _,
+                &mut cur_dir_unicode as *mut _ as *mut _,
+                std::mem::size_of::<UNICODE_STRING>(),
+                None,
+            )
+            .is_err()
+            {
+                CloseHandle(handle);
+                return None;
+            }
+
+            let mut buffer = vec![0u16; (cur_dir_unicode.Length / 2) as usize];
+            if ReadProcessMemory(
+                handle,
+                cur_dir_unicode.Buffer.0 as _,
+                buffer.as_mut_ptr() as *mut _,
+                cur_dir_unicode.Length as usize,
+                None,
+            )
+            .is_err()
+            {
+                CloseHandle(handle);
+                return None;
+            }
+
+            CloseHandle(handle);
+            Some(String::from_utf16_lossy(&buffer))
+        }
     }
 
     fn get_command_line_native(pid: u32) -> Option<String> {
@@ -239,7 +315,11 @@ impl ProcessManager {
                 startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
 
                 let mut process_info_struct: PROCESS_INFORMATION = std::mem::zeroed();
-
+                let cur_dir_wide: Vec<u16> = process_info
+                    .current_directory
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
                 // Convert strings to wide strings
                 let exe_wide: Vec<u16> = executable
                     .encode_utf16()
@@ -256,7 +336,7 @@ impl ProcessManager {
                     false,
                     CREATE_NEW_CONSOLE,
                     None,
-                    PCWSTR::null(),
+                    PCWSTR(cur_dir_wide.as_ptr()),
                     &startup_info,
                     &mut process_info_struct,
                 );
